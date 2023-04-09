@@ -6,6 +6,10 @@ import os
 import sys
 from scipy.interpolate import RegularGridInterpolator
 
+from hist_bins import *
+from utils import *
+# from plotting_methods import *
+
 class CONST:
 
     ns_rho = 1.6191004634e-5
@@ -34,6 +38,7 @@ class FORMULAS:
 
     @staticmethod
     def vinf(eninf):
+        # x=np.sqrt(2. * eninf)
         return np.sqrt(2. * eninf)
 
     @staticmethod
@@ -48,7 +53,8 @@ class FORMULAS:
     def get_tau(rho, vel, radius, lrho_b):
 
         rho_b = 10 ** lrho_b
-        tau_0 = 0.5 * 2.71828182845904523536 * (radius / vel) * (0.004925794970773136) # in ms
+        # tau_0 = 0.5 * 2.71828182845904523536 * (radius / vel) * (0.004925794970773136) # in ms
+        tau_0 = 0.5 * 2.71828182845904523536 * (radius / vel) * 1e3 #* (0.004925794970773136) # in ms
         tau_b = tau_0 * ((rho/rho_b) ** (1.0 / 3.0))
         return tau_b # ms
 
@@ -179,6 +185,7 @@ class COMPUTE_OUTFLOW_SURFACE_H5(LOAD_OUTFLOW_SURFACE_H5):
                                     self.get_full_arr("press"),
                                     self.get_full_arr("rho"))
         elif v_n == "eninf":
+            #         mask = (self.get_full_arr("-u_t-1") > 0).astype(int)#self.get_mask(mask).astype(int)
             arr = self.get_full_arr("-u_t-1") # THIS IS JUST "u_t"
             # arr = -1. * arr - 1.0
         elif v_n == "vel_inf":
@@ -502,8 +509,9 @@ class EJECTA(ADD_MASK):
         t = self.get_full_arr("time")
         dt = np.diff(t)
 
-        mask = (self.get_full_arr("-u_t-1") > 0).astype(int)#self.get_mask(mask).astype(int)
-
+        # mask = (self.get_full_arr("-u_t-1") > 0).astype(int)#self.get_mask(mask).astype(int)
+        mask = self.get_mask(mask).astype(int)
+        #
         res_t_phi_theta = fluxdens*mask*surface_element
         res_t_theta = np.trapz(res_t_phi_theta, dx=dphi[0] ,axis=2)
         flux_arr = np.trapz(res_t_theta, dx=dtheta[0], axis=1)
@@ -512,9 +520,9 @@ class EJECTA(ADD_MASK):
 
         # flux_arr = res_t
 
-        # tot_mass = np.cumsum(flux_arr * dt[0])
-        tot_mass = np.trapz(flux_arr, dx=dt[0], axis=0)/CONST.Msun
-        print(tot_mass)
+        tot_mass = np.cumsum(flux_arr * dt[0])
+        # tot_mass = np.trapz(flux_arr, dx=dt[0], axis=0)/CONST.Msun
+        # print(tot_mass)
         # fluxdens = self.get_full_arr("fD") # "fluxdens"
         # da = self.get_full_arr("surface_element")
         # t = self.get_full_arr("time") / 1.e3 # [s]
@@ -530,13 +538,18 @@ class EJECTA(ADD_MASK):
 
     def get_weights(self, mask):
 
-        dt = np.diff(self.get_full_arr("times"))
+        dt = np.diff(self.get_full_arr("time"))
         dt = np.insert(dt, 0, 0)
         mask_arr = self.get_mask(mask).astype(int)
+        if np.sum(mask_arr) == 0.:
+            _, _, mass = self.get_cumulative_ejected_mass(mask)
+            print("Error. sum(mask_arr) = 0. For mask:{} there is not mass (Total ej.mass is {})".format(mask,mass[-1]))
+            raise ValueError("sum(weights) = 0. For mask:{} there is not mass (Total ej.mass is {})".format(mask,mass[-1]))
+        #
         weights = mask_arr * \
-                  self.get_full_arr("fluxdens") * \
+                  self.get_full_arr("fD") * \
                   self.get_full_arr("surface_element") * \
-                  dt[:, np.newaxis, np.newaxis]
+                  dt[:, np.newaxis, np.newaxis] # fluxdens
         #
         if np.sum(weights) == 0.:
             _, _, mass = self.get_cumulative_ejected_mass(mask)
@@ -743,11 +756,14 @@ class EJECTA(ADD_MASK):
         data_ye = self.get_full_arr("Ye") # Y_e
         data_entr = self.get_full_arr("s") # entropy
         data_rho = self.get_full_arr("rho") #* 6.173937319029555e+17 # CGS
-        data_vel = self.get_full_comp_arr("vel")
+        data_vel = self.get_full_comp_arr("vel")*CONST.c
+        data_vel[~np.isfinite(data_vel)] = 0.
+        if (np.sum(data_vel)==0):
+            raise ValueError()
 
         lrho_b = [[np.zeros(len(data_ye[:, 0, 0]))
                    for i in range(len(data_ye[0, :, 0]))]
-                  for j in range(len(data_ye[0, 0, :]))]
+                   for j in range(len(data_ye[0, 0, :]))]
         for i_theta in range(len(data_ye[0, :, 0])):
             for i_phi in range(len(data_ye[0, 0, :])):
                 data_ye_i = data_ye[:, i_theta, i_phi].flatten()
@@ -768,7 +784,9 @@ class EJECTA(ADD_MASK):
 
         # from d3analysis import FORMULAS
         lrho_b = np.array(lrho_b, dtype=np.float).T
-        data_tau = FORMULAS.get_tau(data_rho, data_vel, self.get_grid_par("radius"), lrho_b)
+        r = self.get_grid_par("radius")
+        data_tau = FORMULAS.get_tau(data_rho, data_vel, r, lrho_b)
+        data_tau[~np.isfinite(data_tau)] = 0.
 
         weights = self.get_ejecta_arr(mask, "weights")
         edges_ye = self.get_edges_from_centers(grid_ye)
@@ -800,7 +818,7 @@ class EJECTA(ADD_MASK):
 
         assert correlation.shape == (17, 17, 17)
 
-        return bins_ye, bins_entr, bins_tau, correlation
+        return (bins_ye, bins_entr, bins_tau, correlation)
 
     def get_mass_averaged(self, mask, v_n):
 
@@ -900,19 +918,592 @@ class EJECTA(ADD_MASK):
         data = self.matrix_ejecta[self.i_mask(mask)][self.i_ejv_n(v_n)]
         return data
 
+class EJECTA_NUCLEO(EJECTA):
+
+    def __init__(self, fname, skynetdir, add_mask=None, radius=None):
+
+        EJECTA.__init__(self, fname=fname, skynetdir=skynetdir, add_mask=add_mask, radius=radius)
+
+        self._list_tab_nuc_v_ns = ["Y_final", "A", "Z"]
+        self._list_sol_nuc_v_ns = ["Ysun", "Asun"]
+
+        self.list_nucleo_v_ns = ["sim final", "solar final", "yields", "Ye", "mass"] \
+                                + self._list_tab_nuc_v_ns + self._list_sol_nuc_v_ns
+
+        self.matrix_ejecta_nucleo = [[np.zeros(0,)
+                                     for i in range(len(self.list_nucleo_v_ns))]
+                                     for j in range(len(self.list_masks))]
+
+        self.set_table_solar_r_fpath = skynetdir / "solar_r.dat"
+        self.set_tabulated_nuc_fpath = skynetdir / "tabulated_nucsyn.h5"
+
+    # ---
+
+    def check_nucleo_v_n(self, v_n):
+        if not v_n in self.list_nucleo_v_ns:
+            raise NameError("nucleo v_n: {} is not in the list:{}"
+                            .format(v_n, self.list_nucleo_v_ns))
+
+    def i_nuc_v_n(self, v_n):
+        return int(self.list_nucleo_v_ns.index(v_n))
+
+    # -------------------------------------------------
+
+    def compute_nucleo_arr(self, mask, v_n):
+
+        if v_n in self._list_tab_nuc_v_ns:
+            assert os.path.isfile(self.set_tabulated_nuc_fpath)
+            dfile = h5py.File(self.set_tabulated_nuc_fpath, "r")
+            for v_n in self._list_tab_nuc_v_ns:
+                arr = np.array(dfile[v_n])
+                self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n(v_n)] = arr
+
+        elif v_n in ["Ye", "mass"]:
+            data = self.get_ejecta_arr(mask, "corr3d Y_e entropy tau")
+            Ye = data[1:, 0, 0]
+            mass = data[1:, 1:, 1:]
+            self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n("Ye")] = Ye
+            self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n("mass")] = mass
+
+        elif v_n in self._list_sol_nuc_v_ns:
+            assert os.path.isfile(self.set_table_solar_r_fpath)
+            Asun, Ysun = np.loadtxt(self.set_table_solar_r_fpath, unpack=True)
+            self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n("Asun")] = Asun
+            self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n("Ysun")] = Ysun
+
+        elif v_n == "yields":
+            mass = np.array(self.get_nucleo_arr(mask, "mass"))
+            # Ye = np.array(self.get_nucleo_arr(det, mask, "Ye"))
+            Ys = np.array(self.get_nucleo_arr(mask, "Y_final"))
+            # As = np.array(self.get_nucleo_arr(det, mask, "A"))
+            # Zs = np.array(self.get_nucleo_arr(det, mask, "Z"))
+
+            yields = np.zeros(Ys.shape[-1])
+            for i in range(yields.shape[0]):
+                yields[i] = np.sum(mass[:, :, :] * Ys[:, :, :, i]) # Relative final abundances
+            self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n("yields")] = yields
+
+        elif v_n == "sim final":
+            yields = self.get_nucleo_arr(mask, "yields")
+            A = self.get_nucleo_arr(mask, "A")
+            Z = self.get_nucleo_arr(mask, "Z")
+            # print(yields.shape)
+            # print(A.shape)
+            # print(Z.shape)
+            arr = np.vstack((yields, A, Z)).T
+            self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n("sim final")] = arr
+
+        elif v_n == "solar final":
+            Asun = self.get_nucleo_arr(mask, "Asun")
+            Ysun = self.get_nucleo_arr(mask, "Ysun")
+            arr = np.vstack((Asun, Ysun)).T
+            self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n("solar final")] = arr
+        else:
+            raise NameError("no nucleo method found for v_n:{} mask:{}"
+                            .format(v_n, mask))
+
+    # -------------------------------------------------
+
+    def is_nucleo_arr_computed(self, mask, v_n):
+        data = self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n(v_n)]
+        if len(data) == 0:
+            self.compute_nucleo_arr(mask, v_n)
+
+        data = self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n(v_n)]
+        if len(data) == 0:
+            raise ValueError("failed to compute nucleo arr for mask:{} v_n:{}"
+                             .format(mask, v_n))
+
+    def get_nucleo_arr(self, mask, v_n):
+        self.check_mask(mask)
+        self.check_nucleo_v_n(v_n)
+        self.is_nucleo_arr_computed(mask, v_n)
+        data = self.matrix_ejecta_nucleo[self.i_mask(mask)][self.i_nuc_v_n(v_n)]
+        return data
+
+    # def get_normalized_yeilds(self, det, mask, method="Asol=195"):
+    #
+    #     Ys = self.get_nucleo_arr(det, mask, "yields")
+    #     As = self.get_nucleo_arr(det, mask, "As")
+    #     Zs = self.get_nucleo_arr(det, mask, "Zs")
+    #
+    #     '''Sums all Ys for a given A (for all Z)'''
+    #     Anrm = np.arange(As.max() + 1)
+    #     Ynrm = np.zeros(int(As.max()) + 1)
+    #     for i in range(Ynrm.shape[0]):  # changed xrange to range
+    #         Ynrm[i] = Ys[As == i].sum()
+    #
+    #     if method == '':
+    #         return Anrm, Ynrm
+    #
+    #     elif method == 'sum':
+    #         ''' Normalizes to a sum of all A '''
+    #         norm = Ynrm.sum()
+    #         Ynrm /= norm
+    #         return Anrm, Ynrm
+    #
+    #     elif method == "Asol=195":
+    #         ''' Normalize to the solar abundances of a given element'''
+    #         # a_sol = self.get_sol_data("Asun")
+    #         # y_sol = self.get_sol_data("Ysun")
+    #         a_sol = self.get_normalized_sol_data("Asun")
+    #         y_sol = self.get_normalized_sol_data("Ysun")
+    #
+    #         element_a = int(method.split("=")[-1])
+    #         if element_a not in a_sol: raise ValueError('Element: a:{} not in solar A\n{}'.format(element_a, a_sol))
+    #         if element_a not in Anrm: raise ValueError('Element: a:{} not in a_arr\n{}'.format(element_a, Anrm))
+    #
+    #         delta = np.float(y_sol[np.where(a_sol == element_a)] / Ynrm[np.where(Anrm == element_a)])
+    #         Ynrm *= delta
+    #
+    #         return Anrm, Ynrm
+    #     else:
+    #         raise NameError("Normalisation method '{}' for the simulation yields is not recognized. Use:{}"
+    #                         .format(method, self.list_norm_methods))
+    #
+    # def get_nucleo_solar_yeilds(self, norm):
+
+class EJECTA_NORMED_NUCLEO(EJECTA_NUCLEO):
+
+    def __init__(self, fname, skynetdir, add_mask=None, radius=None):
+
+        EJECTA_NUCLEO.__init__(self, fname=fname, skynetdir=skynetdir, add_mask=add_mask, radius = radius)
+
+        self.list_nucleo_norm_methods = [
+            "sum", "Asol=195"
+        ]
+
+        self.matrix_normed_sim = [[np.zeros(0,)
+                                  for z in range(len(self.list_nucleo_norm_methods))]
+                                  for y in range(len(self.list_masks))]
+
+        self.matrix_normed_sol = [np.zeros(0,) for z in range(len(self.list_nucleo_norm_methods))]
+
+    # def update_mask(self, new_mask=None):
+    #     if new_mask != None:
+    #         if not new_mask in self.list_masks:
+    #             self.list_masks.append(new_mask)
+    #
+    #             self.mask_matrix = [[np.zeros(0, )
+    #                                  for i in range(len(self.list_masks))]
+    #                                 for j in range(len(self.list_detectors))]
+    #
+    #             self.matrix_ejecta = [[[np.zeros(0, )
+    #                                     for k in range(len(self.list_ejecta_v_ns))]
+    #                                    for j in range(len(self.list_masks))]
+    #                                   for i in range(len(self.list_detectors))]
+    #
+    #             self.matrix_ejecta_nucleo = [[[np.zeros(0, )
+    #                                            for i in range(len(self.list_nucleo_v_ns))]
+    #                                           for j in range(len(self.list_masks))]
+    #                                          for k in range(len(self.list_detectors))]
+    #
+    #             self.matrix_normed_sim = [[[np.zeros(0, )
+    #                                         for x in range(len(self.list_detectors))]
+    #                                        for y in range(len(self.list_masks))]
+    #                                       for z in range(len(self.list_nucleo_norm_methods))]
+    # #
+
+    def check_method(self, method):
+        if not method in self.list_nucleo_norm_methods:
+            raise NameError("method:{} not in the list of normalisation methods: {}"
+                            .format(method, self.list_nucleo_norm_methods))
+
+    def i_meth(self, method):
+        return int(self.list_nucleo_norm_methods.index(method))
+
+    def compute_normalized_sol_yields(self, method='sum'):
+
+        As = self.get_nucleo_arr("geo", "Asun")
+        Ys = self.get_nucleo_arr("geo", "Ysun")
+
+        '''Sums all Ys for a given A (for all Z)'''
+        Anrm = np.arange(As.max() + 1)
+        Ynrm = np.zeros(int(As.max()) + 1)
+        for i in range(Ynrm.shape[0]):  # changed xrange to range
+            Ynrm[i] = Ys[As == i].sum()
+
+        if method == 'sum':
+            Ynrm /= np.sum(Ynrm)
+            return Anrm, Ynrm
+        else:
+            raise NameError("Normalisation method '{}' for the solar is not recognized. Use:{}"
+                            .format(method, self.list_nucleo_norm_methods))
+
+    def is_sol_nucleo_yiled_normed(self, method):
+
+        data = self.matrix_normed_sol[self.i_meth(method)]
+        if len(data) == 0:
+            a_sol, y_sol = self.compute_normalized_sol_yields(method)
+            self.matrix_normed_sol[self.i_meth(method)] = np.vstack((a_sol, y_sol)).T
+
+        data = self.matrix_normed_sol[self.i_meth(method)]
+        if len(data) == 0:
+            raise ValueError("failed to normalize simulations yeilds for: "
+                             "method:{}".format(method))
+
+    def compute_normalized_sim_yelds(self, mask, method):
+
+        As = self.get_nucleo_arr(mask, "A")
+        Ys = self.get_nucleo_arr(mask, "yields")
+
+        '''Sums all Ys for a given A (for all Z)'''
+        Anrm = np.arange(As.max() + 1)
+        Ynrm = np.zeros(int(As.max()) + 1)
+        for i in range(Ynrm.shape[0]):  # changed xrange to range
+            Ynrm[i] = Ys[As == i].sum()
+
+        if method == '':
+            return Anrm, Ynrm
+
+        elif method == 'sum':
+            ''' Normalizes to a sum of all A '''
+            norm = Ynrm.sum()
+            Ynrm /= norm
+            return Anrm, Ynrm
+
+        elif method == "Asol=195":
+            ''' Normalize to the solar abundances of a given element'''
+            # a_sol = self.get_sol_data("Asun")
+            # y_sol = self.get_sol_data("Ysun")
+
+            tmp = self.get_nored_sol_abund("sum")
+            a_sol, y_sol = tmp[:,0], tmp[:,1]
+
+            element_a = int(method.split("=")[-1])
+            if element_a not in a_sol: raise ValueError('Element: a:{} not in solar A\n{}'.format(element_a, a_sol))
+            if element_a not in Anrm: raise ValueError('Element: a:{} not in a_arr\n{}'.format(element_a, Anrm))
+
+            delta = np.float(y_sol[np.where(a_sol == element_a)] / Ynrm[np.where(Anrm == element_a)])
+            Ynrm *= delta
+
+            return Anrm, Ynrm
+        else:
+            raise NameError("Normalisation method '{}' for the simulation yields is not recognized. Use:{}"
+                            .format(method, self.list_nucleo_norm_methods))
+
+    def is_nucleo_yiled_normed(self, mask, method):
+
+        if not mask in self.list_masks:
+            raise NameError("mask:{} is not in the list:{}"
+                            .format(mask, self.list_masks))
+
+        # print(len(self.matrix_normed_sim))
+        # print(self.matrix_normed_sim[self.i_mask(mask)])
+
+        data = self.matrix_normed_sim[self.i_mask(mask)][self.i_meth(method)]
+        if len(data) == 0:
+            a_arr, y_arr = self.compute_normalized_sim_yelds(mask, method)
+            data = np.vstack((a_arr, y_arr)).T
+            self.matrix_normed_sim[self.i_mask(mask)][self.i_meth(method)] = data
+
+        data = self.matrix_normed_sim[self.i_mask(mask)][self.i_meth(method)]
+        if len(data) == 0:
+            raise ValueError("failed to normalize simulations yeilds for: "
+                             "mask:{} method:{}"
+                             .format(mask, method))
+
+    def get_normed_sim_abund(self, mask, method):
+
+        self.check_mask(mask)
+        self.check_method(method)
+        self.is_nucleo_yiled_normed(mask, method)
+        data = self.matrix_normed_sim[self.i_mask(mask)][self.i_meth(method)]
+        return data
+
+    def get_nored_sol_abund(self, method='sum'):
+
+        self.check_method(method)
+        self.is_sol_nucleo_yiled_normed(method)
+        data = self.matrix_normed_sol[self.i_meth(method)]
+        return data
+
+class EJECTA_PARS(EJECTA_NORMED_NUCLEO):
+
+    def __init__(self, fname, skynetdir, add_mask=None, radius=None):
+
+        EJECTA_NORMED_NUCLEO.__init__(self, fname=fname, skynetdir=skynetdir, add_mask=add_mask, radius=radius)
+
+        self.list_ejecta_pars_v_n = [
+            "Mej_tot", "Ye_ave", "s_ave", "vel_inf_ave",
+            "vel_inf_bern_ave", "theta_rms", "E_kin_ave",
+            "E_kin_bern_ave"]
+
+        self.matrix_ejecta_pars = [[123456789.1
+                                 for x in range(len(self.list_ejecta_pars_v_n))]
+                                 for z in range(len(self.list_masks))]
+
+
+
+        self.energy_constant = 1787.5521500932314
+
+    # def update_mask(self, new_mask=None):
+    #
+    #     if new_mask != None:
+    #         if not new_mask in self.list_masks:
+    #             self.list_masks.append(new_mask)
+    #
+    #             self.mask_matrix = [[np.zeros(0, )
+    #                                  for i in range(len(self.list_masks))]
+    #                                 for j in range(len(self.list_detectors))]
+    #
+    #             self.matrix_ejecta = [[[np.zeros(0, )
+    #                                     for k in range(len(self.list_ejecta_v_ns))]
+    #                                    for j in range(len(self.list_masks))]
+    #                                   for i in range(len(self.list_detectors))]
+    #
+    #             self.matrix_ejecta_nucleo = [[[np.zeros(0, )
+    #                                            for i in range(len(self.list_nucleo_v_ns))]
+    #                                           for j in range(len(self.list_masks))]
+    #                                          for k in range(len(self.list_detectors))]
+    #
+    #             self.matrix_normed_sim = [[[np.zeros(0, )
+    #                                         for x in range(len(self.list_detectors))]
+    #                                        for y in range(len(self.list_masks))]
+    #                                       for z in range(len(self.list_nucleo_norm_methods))]
+    #
+    #             self.matrix_ejecta_pars = [[[123456789.1
+    #                                          for x in range(len(self.list_ejecta_pars_v_n))]
+    #                                         for z in range(len(self.list_masks))]
+    #                                        for y in range(len(self.list_detectors))]
+    # #
+
+    def check_ej_par_v_n(self, v_n):
+        if not v_n in self.list_ejecta_pars_v_n:
+            raise NameError("Parameter v_n: {} not in their list: {}"
+                            .format(v_n, self.list_ejecta_pars_v_n))
+
+    def i_ej_par(self, v_n):
+        return int(self.list_ejecta_pars_v_n.index(v_n))
+
+    # ----------------------------------------------
+
+    @staticmethod
+    def compute_ave_ye(mej, hist_ye):
+        ye_ave = np.sum(hist_ye[:, 0] * hist_ye[:, 1]) / mej
+        if ye_ave > 0.6: raise ValueError("Ye_ave > 0.6 ")
+        value = np.float(ye_ave)
+        return value
+
+    @staticmethod
+    def compute_ave_s(mej, hist_s):
+        s_ave = np.sum(hist_s[:, 0] * hist_s[:, 1]) / mej
+        value = np.float(s_ave)
+        return value
+
+    @staticmethod
+    def compute_ave_vel_inf(mej, hist_vinf):
+        vinf_ave = np.sum(hist_vinf[:, 0] * hist_vinf[:, 1]) / mej
+        value = np.float(vinf_ave)
+        return value
+
+    @staticmethod
+    def compute_ave_ekin(mej, hist_vinf):
+        vinf_ave = EJECTA_PARS.compute_ave_vel_inf(mej, hist_vinf)
+        E_kin_ave = np.sum(0.5 * vinf_ave ** 2 * hist_vinf[:, 1]) * Constants.energy_constant
+        value = np.float(E_kin_ave)
+        return value
+
+    @staticmethod
+    def compute_ave_theta_rms(hist_theta):
+        theta, theta_M = hist_theta[:, 0], hist_theta[:, 1]
+        # print(theta, theta_M)
+        theta -= np.pi / 2.
+        theta_rms = (180. / np.pi) * np.sqrt(np.sum(theta_M * theta ** 2) / np.sum(theta_M))
+        value = np.float(theta_rms)
+        return value
+
+    # ----------------------------------------------
+
+    def compute_ejecta_par(self, mask, v_n):
+
+        # print("computing det:{} mask:{} v_n:{}".format(det, mask, v_n))
+
+        if v_n == "Mej_tot":
+            tarr_tot_flux_tot_mass = self.get_ejecta_arr(mask, "tot_mass")
+            value = tarr_tot_flux_tot_mass[-1, 2]
+
+        elif v_n == "Ye_ave":
+            mej = self.get_ejecta_par(mask, "Mej_tot")
+            hist_ye = self.get_ejecta_arr(mask, "hist Y_e")
+            ye_ave = np.sum(hist_ye[:,0] * hist_ye[:,1]) / mej
+            if ye_ave > 0.6: raise ValueError("Ye_ave > 0.6 "
+                                              "mask:{} v_n:{}"
+                                              .format(mask, v_n))
+            value = np.float(ye_ave)
+
+        elif v_n == "entropy_ave" or v_n == "s_ave":
+            mej = self.get_ejecta_par(mask, "Mej_tot")
+            hist_s = self.get_ejecta_arr(mask, "hist entropy")
+            s_ave = np.sum(hist_s[:,0] * hist_s[:,1]) / mej
+            value = np.float(s_ave)
+
+        elif v_n == "vel_inf_ave":
+            # if mask.__contains__("bern"):
+            #     vel_v_n = "vel_inf_bern"
+            # else:
+            #     vel_v_n = "vel_inf"
+
+            mej = self.get_ejecta_par(mask, "Mej_tot")
+            hist_vinf = self.get_ejecta_arr(mask, "hist vel_inf")
+            vinf_ave = np.sum(hist_vinf[:,0] * hist_vinf[:,1]) / mej
+            value = np.float(vinf_ave)
+
+        elif v_n == "E_kin_ave":
+            # if v_n.__contains__("bern"):
+            #     vel_v_n = "vel_inf_bern"
+            # else:
+            #     vel_v_n = "vel_inf"
+
+            vinf_ave = self.get_ejecta_par(mask, "vel_inf_ave")
+            hist_vinf = self.get_ejecta_arr(mask, "hist vel_inf")
+            E_kin_ave = np.sum(0.5 * vinf_ave ** 2 * hist_vinf[:,1]) * self.energy_constant
+            value = np.float(E_kin_ave)
+
+        elif v_n == 'theta_rms':
+            hist_theta = self.get_ejecta_arr(mask, "hist theta")
+            theta, theta_M = hist_theta[:,0], hist_theta[:,1]
+            theta -= np.pi / 2
+            theta_rms = 180. / np.pi * np.sqrt(np.sum(theta_M * theta ** 2) / np.sum(theta_M))
+            value = np.float(theta_rms)
+
+        else:
+            raise NameError("module_ejecta par v_n: {} (mask:{}) does not have a"
+                            " method for computing".format(v_n, mask))
+        return value
+
+    # ----------------------------------------------
+
+    def is_ej_par_computed(self, mask, v_n):
+
+        data = self.matrix_ejecta_pars[self.i_mask(mask)][self.i_ej_par(v_n)]
+        if data == 123456789.1:
+            value = self.compute_ejecta_par(mask, v_n)
+            self.matrix_ejecta_pars[self.i_mask(mask)][self.i_ej_par(v_n)] = value
+
+        data = self.matrix_ejecta_pars[self.i_mask(mask)][self.i_ej_par(v_n)]
+        if data == 123456789.1:
+            raise ValueError("failed to compute module_ejecta par v_n:{} mask:{}"
+                             .format(v_n, mask))
+
+    def get_ejecta_par(self, mask, v_n):
+        self.check_mask(mask)
+        self.check_ej_par_v_n(v_n)
+        self.is_ej_par_computed(mask, v_n)
+        data = self.matrix_ejecta_pars[self.i_mask(mask)][self.i_ej_par(v_n)]
+        return data
+
+
+def task(mask, fpath, outdir):
+    o_outflow = EJECTA_PARS(fname=Path("../../data/large/skynet_input.h5"), skynetdir=Path("../../data/skynet"), radius=450. * 1000 * 100)
+
+    yields = o_outflow.get_nucleo_arr(mask, "yields")
+    a = o_outflow.get_nucleo_arr(mask, "A")
+    z = o_outflow.get_nucleo_arr(mask, "Z")
+    dfile = h5py.File(fpath, "w")
+    dfile.create_dataset("Y_final", data=yields)
+    dfile.create_dataset("A", data=a)
+    dfile.create_dataset("Z", data=z)
+    dfile.close()
+
+    sim_nuc = o_outflow.get_normed_sim_abund(mask, "Asol=195") # Asol=195
+    sol_nuc = o_outflow.get_nored_sol_abund("sum")
+
+    fig, ax = plt.subplots(ncols=1, nrows=1)
+    ax.plot(sim_nuc[:, 0], sim_nuc[:, 1], drawstyle="steps", color="gray", label="Simulation")
+    ax.plot(sol_nuc[:, 0], sol_nuc[:, 1], marker="o", linestyle="None", color="gray", label="Solar")
+    ax.tick_params(
+        axis='both', which='both', labelleft=True,
+        labelright=False, tick1On=True, tick2On=True,
+        labelsize=int(11),
+        direction='in',
+        bottom=True, top=True, left=True, right=True
+    )
+    ax.set_xlim(50, 210)
+    ax.set_ylim(1e-5, 1.)
+    ax.set_xlabel("Atomic number")
+    ax.set_ylabel("Final yields (normalized to A=195)")
+    ax.set_xscale("linear")
+    ax.set_yscale("log")
+    ax.minorticks_on()
+    plt.tight_layout()
+    plt.legend()
+    plt.savefig(os.getcwd()+"/yields.png",dpi=256)
+    plt.show()
+
+    o_plot = PLOT_MANY_TASKS()
+    o_plot.gen_set["figdir"] = outdir
+    o_plot.gen_set["type"] = "cartesian"
+    o_plot.gen_set["figsize"] = (4.2, 3.6)  # <->, |]
+    o_plot.gen_set["figname"] = "yields.png"
+    o_plot.gen_set["sharex"] = False
+    o_plot.gen_set["sharey"] = False
+    o_plot.gen_set["dpi"] = 128
+    o_plot.gen_set["subplots_adjust_h"] = 0.3
+    o_plot.gen_set["subplots_adjust_w"] = 0.0
+    o_plot.set_plot_dics = []
+
+
+
+    sim_nucleo = {
+        'task': 'line', 'ptype': 'cartesian',
+        'position': (1, 1),
+        'xarr': sim_nuc[:, 0], 'yarr': sim_nuc[:, 1],
+        'v_n_x': 'A', 'v_n_y': 'abundances',
+        'color': 'black', 'ls': '-', 'lw': 0.8, 'ds': 'steps', 'alpha': 1.0,
+        'ymin': 1e-5, 'ymax': 2e-1, 'xmin': 50, 'xmax': 210,
+        'xlabel': Labels.labels("A"), 'ylabel': Labels.labels("Y_final"),
+        'label': None, 'yscale': 'log',
+        'fancyticks': True, 'minorticks': True,
+        'fontsize': 18,
+        'labelsize': 14,
+    }
+    o_plot.set_plot_dics.append(sim_nucleo)
+
+    sol_yeilds = {
+        'task': 'line', 'ptype': 'cartesian',
+        'position': (1, 1),
+        'xarr': sol_nuc[:, 0], 'yarr': sol_nuc[:, 1],
+        'v_n_x': 'Asun', 'v_n_y': 'Ysun',
+        'color': 'gray', 'marker': 'o', 'ms': 4, 'alpha': 0.4,
+        'ymin': 1e-5, 'ymax': 2e-1, 'xmin': 50, 'xmax': 210,
+        'xlabel': Labels.labels("A"), 'ylabel': Labels.labels("Y_final"),
+        'label': 'solar', 'yscale': 'log',
+        'fancyticks': True, 'minorticks': True,
+        'fontsize': 14,
+        'labelsize': 14,
+    }
+    o_plot.set_plot_dics.append(sol_yeilds)
+    o_plot.main()
+
 def main():
+
+    task("geo", os.getcwd()+"/yields.h5", os.getcwd()+"/")
 
     # o_dfile = COMPUTE_OUTFLOW_SURFACE_H5(fname=Path("../../data/large/skynet_input.h5"), radius=450. * 1000 * 100)
     # print( len( o_dfile.get_full_comp_arr("einf")[o_dfile.get_full_comp_arr("einf") > 0] ) )
 
-    o_ej = EJECTA(fname=Path("../../data/large/skynet_input.h5"), skynetdir=Path("../../data/skynet"), radius=450. * 1000 * 100)
-    arr = o_ej.get_full_arr("eninf")
-    print(arr.min(), arr.max())
-    print(len(np.array(arr[arr>0]).flatten()))
+    o_outflow = EJECTA_PARS(fname=Path("../../data/large/skynet_input.h5"), skynetdir=Path("../../data/skynet"), radius=450. * 1000 * 100)
+    arr = o_outflow.get_full_arr("eninf")
+    # print(arr.min(), arr.max())
+    # print(len(np.array(arr[arr>0]).flatten()))
 
-    time, mass_flux, mass = o_ej.get_cumulative_ejected_mass("geo")
-    print(mass[-1]/CONST.Msun)
-    plt.semilogy(time, mass/CONST.Msun)
+    time, mass_flux, mass = o_outflow.get_cumulative_ejected_mass("geo")
+
+    yields = o_outflow.get_nucleo_arr("geo", "yields")
+    a = o_outflow.get_nucleo_arr("geo", "A")
+    z = o_outflow.get_nucleo_arr("geo", "Z")
+    # dfile = h5py.File(fpath, "w")
+    # dfile.create_dataset("Y_final", data=yields)
+    # dfile.create_dataset("A", data=a)
+    # dfile.create_dataset("Z", data=z)
+    # dfile.close()
+
+    # sim_nuc = o_outflow.get_normed_sim_abund(0, "geo", "Asol=195")
+    # sol_nuc = o_outflow.get_nored_sol_abund("sum")
+
+    print(2.*mass/CONST.Msun)
+    plt.plot(time, mass/CONST.Msun)
     plt.show()
 
     #
