@@ -1,10 +1,25 @@
+'''
+    /work/fschianchi/projects/BNS_M1/M1_runs/new/DD2/DD2_M1_q12/DD2_128_M1_q12/postproc_ejecta/
+
+    rsync -arvp --append vnedora@enlil.gw.physik.uni-potsdam.de:/work/fschianchi/projects/BNS_M1/M1_runs/new/DD2/DD2_M1_q1/DD2_128_M1_q1/postproc_ejecta/skynet_input.h5 ./
+'''
+
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 import h5py
 import os
 import sys
+import numba
 from scipy.interpolate import RegularGridInterpolator
+# from scidata.carpet.interp import Interpolator
+
+# exit(1)
+
+from matplotlib import ticker, cm, rc, rcParams
+rc('text', usetex=True) # $ sudo apt-get install cm-super
+rc('font', family='serif')
+rcParams['font.size'] = 8
 
 from hist_bins import *
 from utils import *
@@ -76,7 +91,7 @@ class LOAD_OUTFLOW_SURFACE_H5:
         # self.list_v_ns = ["fluxdens", "w_lorentz", "eninf", "surface_element",
         #                   "alp", "rho", "vel[0]", "vel[1]", "vel[2]", "Y_e",
         #                   "press", "entropy", "temperature", "eps"]
-        self.list_v_ns = ['-u_t-1', 'Ye', 'epsl', 'fD', 'phi', 'press', 'rho', 's', 'surface_element', 'theta', 'time']
+        self.list_v_ns = ['-u_t-1', 'W', 'Ye', 'epsl', 'fD', 'phi', 'press', 'rho', 's', 'surface_element', 'theta', 'time']
 
         self.list_grid_v_ns = ["theta", "phi", 'times']
 
@@ -109,7 +124,8 @@ class LOAD_OUTFLOW_SURFACE_H5:
 
     def load_h5_file(self):
 
-        assert os.path.isfile(self.fname)
+        if not os.path.isfile(self.fname):
+            raise IOError(f"File does not exist: {self.fname}")
         print("\tLoading {}".format(self.fname))
         dfile = h5py.File(self.fname, "r")
 
@@ -181,7 +197,7 @@ class COMPUTE_OUTFLOW_SURFACE_H5(LOAD_OUTFLOW_SURFACE_H5):
     def compute_arr(self, v_n):
 
         if v_n == "enthalpy":
-            arr = FORMULAS.enthalpy(self.get_full_arr("eps"),
+            arr = FORMULAS.enthalpy(self.get_full_arr("epsl"),
                                     self.get_full_arr("press"),
                                     self.get_full_arr("rho"))
         elif v_n == "eninf":
@@ -195,8 +211,8 @@ class COMPUTE_OUTFLOW_SURFACE_H5(LOAD_OUTFLOW_SURFACE_H5):
             arr = FORMULAS.vinf_bern(self.get_full_arr("eninf"),
                                      self.get_full_arr("enthalpy"))
         elif v_n == "vel":
-            # arr = FORMULAS.vel(self.get_full_arr("w_lorentz"))
-            arr = FORMULAS.vinf(self.get_full_arr("eninf"))
+            arr = FORMULAS.vel(self.get_full_arr("W")) # w_lorentz
+            # arr = FORMULAS.vinf(self.get_full_arr("eninf"))
         elif v_n == "logrho":
             arr = np.log10(self.get_full_arr("rho"))
         else:
@@ -460,6 +476,9 @@ class ADD_MASK(COMPUTE_OUTFLOW_SURFACE_H5):
         self.check_mask(mask)
         self.is_mask_computed(mask)
         return self.mask_matrix[self.i_mask(mask)]
+pass
+
+
 
 class EJECTA(ADD_MASK):
 
@@ -467,10 +486,10 @@ class EJECTA(ADD_MASK):
 
         ADD_MASK.__init__(self, fname=fname, add_mask=add_mask, radius=radius)
 
-        self.list_hist_v_ns = ["Y_e", "theta", "phi", "vel_inf", "entropy", "temperature", "logrho"]
+        self.list_hist_v_ns = ["Ye", "theta", "phi", "vel_inf", "s", "temperature", "logrho", "epsl", "press"]
 
-        self.list_corr_v_ns = ["Y_e theta", "vel_inf theta", "Y_e vel_inf",
-                               "logrho vel_inf", "logrho theta", "logrho Y_e"]
+        self.list_corr_v_ns = ["Ye theta", "vel_inf theta", "Ye vel_inf",
+                               "logrho vel_inf", "logrho theta", "logrho Ye"]
 
         self.list_ejecta_v_ns = [
                                     "tot_mass", "tot_flux",  "weights", "corr3d Y_e entropy tau",
@@ -546,10 +565,25 @@ class EJECTA(ADD_MASK):
             print("Error. sum(mask_arr) = 0. For mask:{} there is not mass (Total ej.mass is {})".format(mask,mass[-1]))
             raise ValueError("sum(weights) = 0. For mask:{} there is not mass (Total ej.mass is {})".format(mask,mass[-1]))
         #
+        # weights = mask_arr * \
+        #           self.get_full_arr("fD") * \
+        #           self.get_full_arr("surface_element") * \
+        #           dt[:, np.newaxis, np.newaxis] # fluxdens
+
+        theta = self.get_full_arr("theta")
+        dtheta = np.diff(theta)[0]
+        # dtheta.insert(dtheta, 0, 0)
+        phi = self.get_full_arr("phi")
+        dphi = np.diff(phi)[0]
+        # dphi.insert(dphi, 0, 0)
+
         weights = mask_arr * \
                   self.get_full_arr("fD") * \
                   self.get_full_arr("surface_element") * \
-                  dt[:, np.newaxis, np.newaxis] # fluxdens
+                  np.full_like(theta,dtheta)[np.newaxis, :, np.newaxis] * \
+                  np.full_like(phi,dphi)[np.newaxis, np.newaxis, :] * \
+                  dt[:, np.newaxis, np.newaxis]  # fluxdens
+
         #
         if np.sum(weights) == 0.:
             _, _, mass = self.get_cumulative_ejected_mass(mask)
@@ -558,28 +592,32 @@ class EJECTA(ADD_MASK):
         #
         return weights
 
+
     def get_hist(self, mask, v_n, edge):
 
-        times = self.get_full_arr("times")
+        times = self.get_full_arr("time")
         weights = np.array(self.get_ejecta_arr(mask, "weights"))
+        print(f"sum_weights = {np.sum(weights)/CONST.Msun}")
         data = np.array(self.get_full_arr(v_n))
         # if v_n == "rho":
         #     data = np.log10(data)
         historgram = np.zeros(len(edge) - 1)
+        # _tmp(times,data,edge,weights)
         # tmp2 = []
-        # print(data.shape, weights.shape, edge.shape)
+        print(data.shape, weights.shape, edge.shape)
         for i in range(len(times)):
             if np.array(data).ndim == 3: data_ = data[i, :, :].flatten()
             else: data_ = data.flatten()
             # print(data.min(), data.max())
             tmp, _ = np.histogram(data_, bins=edge, weights=weights[i, :, :].flatten())
             historgram += tmp
+            print(f"i={i}/{len(times)} sum(hist)={np.sum(tmp)}")
         middles = 0.5 * (edge[1:] + edge[:-1])
         assert len(historgram) == len(middles)
         if np.sum(historgram) == 0.:
             print("Error. Histogram weights.sum() = 0 ")
             raise ValueError("Error. Histogram weights.sum() = 0 ")
-        return middles, historgram
+        return (middles, historgram)
 
         # res = np.vstack((middles, historgram))
         # return res
@@ -1070,7 +1108,7 @@ class EJECTA_NORMED_NUCLEO(EJECTA_NUCLEO):
         EJECTA_NUCLEO.__init__(self, fname=fname, skynetdir=skynetdir, add_mask=add_mask, radius = radius)
 
         self.list_nucleo_norm_methods = [
-            "sum", "Asol=195"
+            "sum", "Asol=195", "Asol=135", "Asol=152"
         ]
 
         self.matrix_normed_sim = [[np.zeros(0,)
@@ -1162,7 +1200,7 @@ class EJECTA_NORMED_NUCLEO(EJECTA_NUCLEO):
             Ynrm /= norm
             return Anrm, Ynrm
 
-        elif method == "Asol=195":
+        elif (method == "Asol=195") or (method == "Asol=135") or (method == "Asol=152"):
             ''' Normalize to the solar abundances of a given element'''
             # a_sol = self.get_sol_data("Asun")
             # y_sol = self.get_sol_data("Ysun")
@@ -1357,7 +1395,7 @@ class EJECTA_PARS(EJECTA_NORMED_NUCLEO):
 
             vinf_ave = self.get_ejecta_par(mask, "vel_inf_ave")
             hist_vinf = self.get_ejecta_arr(mask, "hist vel_inf")
-            E_kin_ave = np.sum(0.5 * vinf_ave ** 2 * hist_vinf[:,1]) * self.energy_constant
+            E_kin_ave = np.sum(0.5 * vinf_ave ** 2 * hist_vinf[:,1]) #* self.energy_constant
             value = np.float(E_kin_ave)
 
         elif v_n == 'theta_rms':
@@ -1393,9 +1431,202 @@ class EJECTA_PARS(EJECTA_NORMED_NUCLEO):
         data = self.matrix_ejecta_pars[self.i_mask(mask)][self.i_ej_par(v_n)]
         return data
 
+def plot_ej_mass():
+    tasks = [
+        # {"fname": "../../data/large/DD2_128_M1_q1/skynet_input.h5", "mask": "geo", "label": "DD2_q1", "color": "blue", "ls": "-"},
+        # {"fname": "../../data/large/DD2_128_M1_q12/skynet_input.h5", "mask": "geo", "label": "DD2_q12", "color": "purple", "ls": "-"},
+        # {"fname": "../../data/large/SFHo_128_M1_q1/skynet_input.h5", "mask": "geo", "label": "SFHo_q1", "color": "orange", "ls": "-"},
+        # {"fname": "../../data/large/SFHo_128_M1_q12/skynet_input.h5", "mask": "geo", "label": "SFHo_q12", "color": "red", "ls": "-"},
 
+        {"fname": "../../data/large/DD2_128_M1_q1/skynet_input.h5", "mask": "bern", "label": "DD2_q1", "color": "blue", "ls": "-"},
+        {"fname": "../../data/large/DD2_128_M1_q12/skynet_input.h5", "mask": "bern", "label": "DD2_q12", "color": "purple", "ls": "-"},
+        {"fname": "../../data/large/SFHo_128_M1_q1/skynet_input.h5", "mask": "bern", "label": "SFHo_q1", "color": "orange", "ls": "-"},
+        {"fname": "../../data/large/SFHo_128_M1_q12/skynet_input.h5", "mask": "bern", "label": "SFHo_q12", "color": "red", "ls": "-"}
+    ]
+
+    fig, ax = plt.subplots(ncols=1, nrows=1, figsize=(4.6, 3.2))  # (1. * 2 , 1.618 * size)
+    for t in tasks:
+        fpath = t["fname"]
+        o_outflow = EJECTA_PARS(fname=Path(t["fname"]),
+                                skynetdir=Path("../../data/skynet"),
+                                radius=450. * 1000 * 100)
+        time, mass_flux, mass = o_outflow.get_cumulative_ejected_mass(t["mask"])
+        ax.plot(time*1e3, mass/CONST.Msun*2, color=t["color"], ls=t["ls"], label=t["label"])
+
+    ax.set_xlim(0, 70)
+    ax.set_ylim(0, 0.015)
+    ax.set_xlabel(r"$t$ [ms]", fontsize=11)
+    ax.set_ylabel(r"$M_{\rm ej}$ [$M_{\odot}$]", fontsize=11)
+    ax.set_xscale("linear")
+    ax.set_yscale("linear")
+    ax.minorticks_on()
+    plt.tight_layout()
+    plt.legend(**{"fancybox": False, "loc": 'upper right',
+                  # "bbox_to_anchor": (0.15, 0.99),  # loc=(0.0, 0.6),  # (1.0, 0.3), # <-> |
+                  "shadow": "False", "ncol": 3, "fontsize": 11,
+                  "framealpha": 0., "borderaxespad": 0., "frameon": False})
+    plt.savefig(os.getcwd() + "/total_mass.png", dpi=256)
+    plt.show()
+
+
+
+def plot_nucleo(save=False):
+
+    tasks =[
+        {"fname":"../../data/large/DD2_128_M1_q1/skynet_input.h5", "mask":"geo", "label":"DD2_q1", "color":"blue", "ls":"-", "lw":0.9,"alpha":.8},
+        {"fname":"../../data/large/DD2_128_M1_q12/skynet_input.h5", "mask":"geo", "label":"DD2_q12","color":"purple", "ls":"-", "lw":0.9,"alpha":.8},
+        {"fname":"../../data/large/SFHo_128_M1_q1/skynet_input.h5", "mask":"geo", "label":"SFHo_q1", "color":"orange", "ls":"-", "lw":0.9,"alpha":.8},
+        {"fname":"../../data/large/SFHo_128_M1_q12/skynet_input.h5", "mask":"geo", "label":"SFHo_q12", "color":"red", "ls":"-", "lw":0.9,"alpha":.8},
+
+        {"fname": "../../data/large/DD2_128_M1_q1/skynet_input.h5", "mask": "bern", "color": "blue", "ls": "--", "lw":0.9,"alpha":1.},
+        {"fname": "../../data/large/DD2_128_M1_q12/skynet_input.h5", "mask": "bern", "color": "purple", "ls": "--", "lw":0.9,"alpha":1.},
+        {"fname": "../../data/large/SFHo_128_M1_q1/skynet_input.h5", "mask": "bern", "color": "orange", "ls": "--", "lw":0.9,"alpha":1.},
+        {"fname": "../../data/large/SFHo_128_M1_q12/skynet_input.h5", "mask": "bern", "color": "red", "ls": "--", "lw":0.9,"alpha":1.}
+
+    ]
+
+    size = 3.5
+    fig, ax = plt.subplots(ncols=1, nrows=1, figsize=(1.618*size,size)) # (1. * 2 , 1.618 * size)
+    for t in tasks:
+        fpath = t["fname"]
+        o_outflow = EJECTA_PARS(fname=Path(t["fname"]),
+                                skynetdir=Path("../../data/skynet"),
+                                radius=450. * 1000 * 100)
+
+        if (save):
+            yields = o_outflow.get_nucleo_arr(t["mask"], "yields")
+            a = o_outflow.get_nucleo_arr(t["mask"], "A")
+            z = o_outflow.get_nucleo_arr(t["mask"], "Z")
+            dfile = h5py.File(fpath.replace(".h5","_{}_yields.h5".format(t["mask"])), "w")
+            dfile.create_dataset("Y_final", data=yields)
+            dfile.create_dataset("A", data=a)
+            dfile.create_dataset("Z", data=z)
+            dfile.close()
+        else:
+            pass
+
+
+        sim_nuc = o_outflow.get_normed_sim_abund(t["mask"], method="Asol=195")  # Asol=195
+        if "label" in t.keys(): ax.plot(sim_nuc[:, 0], sim_nuc[:, 1], drawstyle="steps", color=t["color"],ls=t["ls"], label=t["label"], lw=t["lw"], alpha=t["alpha"])
+        else: ax.plot(sim_nuc[:, 0], sim_nuc[:, 1], drawstyle="steps", color=t["color"],ls=t["ls"], lw=t["lw"], alpha=t["alpha"])
+
+    sol_nuc = o_outflow.get_nored_sol_abund(method="sum")
+    ax.plot(sol_nuc[:, 0], sol_nuc[:, 1], marker="o", linestyle="None", color="gray", fillstyle="none", label="Solar")
+    ax.tick_params(
+        axis='both', which='both', labelleft=True,
+        labelright=False, tick1On=True, tick2On=True,
+        labelsize=int(11),
+        direction='in',
+        bottom=True, top=True, left=True, right=True
+    )
+    ax.set_xlim(50, 210)
+    ax.set_ylim(1e-4, 1.)
+    ax.set_xlabel("Atomic mass number",fontsize=11)
+    ax.set_ylabel("Relative final abundances, $A$",fontsize=11)
+    ax.set_xscale("linear")
+    ax.set_yscale("log")
+    ax.minorticks_on()
+    plt.tight_layout()
+    plt.legend(**{"fancybox": False, "loc": 'upper right',
+                           # "bbox_to_anchor": (0.15, 0.99),  # loc=(0.0, 0.6),  # (1.0, 0.3), # <-> |
+                           "shadow": "False", "ncol": 3, "fontsize": 11,
+                           "framealpha": 0., "borderaxespad": 0., "frameon": False})
+    plt.savefig(os.getcwd() + "/yields_a195_bern.png", dpi=256)
+    plt.show()
+def plot_nucleo_method(save=False):
+
+    tasks =[
+
+        {"fname":"../../data/large/SFHo_128_M1_q1/skynet_input.h5","method":"Asol=195", "mask":"geo", "label":r"$A_{\rm sol}=195$", "color":"blue", "ls":"-", "lw":1.0,"alpha":.8},
+        {"fname":"../../data/large/SFHo_128_M1_q1/skynet_input.h5","method":"Asol=152", "mask":"geo", "label":r"$A_{\rm sol}=152$", "color":"green", "ls":"-", "lw":1.0,"alpha":.8},
+        {"fname":"../../data/large/SFHo_128_M1_q1/skynet_input.h5","method":"Asol=135", "mask":"geo", "label":r"$A_{\rm sol}=135$", "color":"red", "ls":"-", "lw":1.0,"alpha":.8},
+
+        {"fname": "../../data/large/SFHo_128_M1_q1/skynet_input.h5","method":"Asol=195", "mask": "bern", "color": "blue", "ls": "--", "lw":1.0,"alpha":1.},
+        {"fname": "../../data/large/SFHo_128_M1_q1/skynet_input.h5","method":"Asol=152", "mask": "bern", "color": "green", "ls": "--", "lw":1.0,"alpha":1.},
+        {"fname": "../../data/large/SFHo_128_M1_q1/skynet_input.h5","method":"Asol=135", "mask": "bern", "color": "red", "ls": "--", "lw":1.0,"alpha":1.},
+
+    ]
+
+    size = 3.5
+    fig, ax = plt.subplots(ncols=1, nrows=1, figsize=(1.618 * size, size))  # (1. * 2 , 1.618 * size)
+    for t in tasks:
+        fpath = t["fname"]
+        o_outflow = EJECTA_PARS(fname=Path(t["fname"]),
+                                skynetdir=Path("../../data/skynet"),
+                                radius=450. * 1000 * 100)
+
+        if (save):
+            yields = o_outflow.get_nucleo_arr(t["mask"], "yields")
+            a = o_outflow.get_nucleo_arr(t["mask"], "A")
+            z = o_outflow.get_nucleo_arr(t["mask"], "Z")
+            dfile = h5py.File(fpath.replace(".h5","_{}_yields.h5".format(t["mask"])), "w")
+            dfile.create_dataset("Y_final", data=yields)
+            dfile.create_dataset("A", data=a)
+            dfile.create_dataset("Z", data=z)
+            dfile.close()
+        else:
+            pass
+
+
+        sim_nuc = o_outflow.get_normed_sim_abund(t["mask"], method=t["method"])  # Asol=195
+        if "label" in t.keys(): ax.plot(sim_nuc[:, 0], sim_nuc[:, 1], drawstyle="steps", color=t["color"],ls=t["ls"], label=t["label"], lw=t["lw"], alpha=t["alpha"])
+        else: ax.plot(sim_nuc[:, 0], sim_nuc[:, 1], drawstyle="steps", color=t["color"],ls=t["ls"], lw=t["lw"], alpha=t["alpha"])
+
+    sol_nuc = o_outflow.get_nored_sol_abund(method="sum")
+    ax.plot(sol_nuc[:, 0], sol_nuc[:, 1], marker="o", linestyle="None", color="gray", fillstyle="none", label="Solar")
+    ax.tick_params(
+        axis='both', which='both', labelleft=True,
+        labelright=False, tick1On=True, tick2On=True,
+        labelsize=int(11),
+        direction='in',
+        bottom=True, top=True, left=True, right=True
+    )
+    ax.set_xlim(50, 210)
+    ax.set_ylim(1e-4, 1.)
+    ax.set_xlabel("Atomic mass number",fontsize=11)
+    ax.set_ylabel("Relative final abundances, $A$",fontsize=11)
+    ax.set_xscale("linear")
+    ax.set_yscale("log")
+    ax.minorticks_on()
+    plt.tight_layout()
+    plt.legend(**{"fancybox": False, "loc": 'upper right',
+                           # "bbox_to_anchor": (0.15, 0.99),  # loc=(0.0, 0.6),  # (1.0, 0.3), # <-> |
+                           "shadow": "False", "ncol": 3, "fontsize": 11,
+                           "framealpha": 0., "borderaxespad": 0., "frameon": False})
+    plt.savefig(os.getcwd() + "/yields_methods.png", dpi=256)
+    plt.show()
 def task(mask, fpath, outdir):
+    dfile = h5py.File("../../data/large/skynet_input.h5")
+    print(dfile.keys())
     o_outflow = EJECTA_PARS(fname=Path("../../data/large/skynet_input.h5"), skynetdir=Path("../../data/skynet"), radius=450. * 1000 * 100)
+
+    # plot cumulative ejecta mass
+    time, mass_flux, mass = o_outflow.get_cumulative_ejected_mass("geo")
+    print(f"Total = {mass[-1] / CONST.Msun} Msun")
+    fig, ax = plt.subplots(ncols=1,nrows=1)
+    ax.plot(time,mass/CONST.Msun)
+    ax.set_yscale("log")
+    ax.set_xlabel("time [s]")
+    ax.set_ylabel("Cumulative ejecta mass [Msun]")
+    plt.show()
+
+    # plot ejecta Ye histogram
+    # bins, masses = o_outflow.get_hist("geo","Ye",edge=np.linspace(0.,0.5,50,endpoint=True))
+    ''' hist '''
+    # hist = o_outflow.get_ejecta_arr(mask, "hist {}".format("Ye"))
+    # np.savetxt("../../data/small/" + "hist_{}.dat".format("Ye"), X=hist)
+    ''' plot hist  '''
+    # bins, masses = np.loadtxt("../../data/small/" + "hist_{}.dat".format("Ye"), unpack=True)
+    # print(f"Total = {np.sum(masses)/CONST.Msun} Msun")
+
+    # fig, ax = plt.subplots(ncols=1, nrows=1)
+    # ax.plot(bins, masses/CONST.Msun, drawstyle='steps')
+    # ax.set_yscale("log")
+    # ax.set_xlabel("Ye")
+    # ax.set_ylabel("Mass")
+    # plt.show()
+
+    # o_outflow.get_corr2d("geo","s","Ye",)
 
     yields = o_outflow.get_nucleo_arr(mask, "yields")
     a = o_outflow.get_nucleo_arr(mask, "A")
@@ -1406,11 +1637,13 @@ def task(mask, fpath, outdir):
     dfile.create_dataset("Z", data=z)
     dfile.close()
 
-    sim_nuc = o_outflow.get_normed_sim_abund(mask, "Asol=195") # Asol=195
-    sol_nuc = o_outflow.get_nored_sol_abund("sum")
+    sim_nuc = o_outflow.get_normed_sim_abund(mask, method="Asol=195") # Asol=195
+    sim_nuc_sum = o_outflow.get_normed_sim_abund(mask, method="sum") # Asol=195
+    sol_nuc = o_outflow.get_nored_sol_abund(method="sum")
 
     fig, ax = plt.subplots(ncols=1, nrows=1)
-    ax.plot(sim_nuc[:, 0], sim_nuc[:, 1], drawstyle="steps", color="gray", label="Simulation")
+    ax.plot(sim_nuc[:, 0], sim_nuc[:, 1], drawstyle="steps", color="gray", label=r"SFHo $q=1.00$ (normed to $A=195$")
+    # ax.plot(sim_nuc[:, 0], sim_nuc_sum[:, 1], drawstyle="steps", color="gray", label=r"SFHo $q=1.00  (normed to sum")
     ax.plot(sol_nuc[:, 0], sol_nuc[:, 1], marker="o", linestyle="None", color="gray", label="Solar")
     ax.tick_params(
         axis='both', which='both', labelleft=True,
@@ -1428,14 +1661,14 @@ def task(mask, fpath, outdir):
     ax.minorticks_on()
     plt.tight_layout()
     plt.legend()
-    plt.savefig(os.getcwd()+"/yields.png",dpi=256)
+    plt.savefig(os.getcwd()+"/yields_a135.png",dpi=256)
     plt.show()
 
     o_plot = PLOT_MANY_TASKS()
     o_plot.gen_set["figdir"] = outdir
     o_plot.gen_set["type"] = "cartesian"
     o_plot.gen_set["figsize"] = (4.2, 3.6)  # <->, |]
-    o_plot.gen_set["figname"] = "yields.png"
+    o_plot.gen_set["figname"] = "yields_a135.png"
     o_plot.gen_set["sharex"] = False
     o_plot.gen_set["sharey"] = False
     o_plot.gen_set["dpi"] = 128
@@ -1477,34 +1710,45 @@ def task(mask, fpath, outdir):
     o_plot.main()
 
 def main():
+    # plot_ej_mass()
+    plot_nucleo()
+    plot_nucleo_method()
 
+
+    exit(1)
+
+    dfile = h5py.File("../../data/large/skynet_input.h5")
+    print(dfile.keys())
     task("geo", os.getcwd()+"/yields.h5", os.getcwd()+"/")
-
-    # o_dfile = COMPUTE_OUTFLOW_SURFACE_H5(fname=Path("../../data/large/skynet_input.h5"), radius=450. * 1000 * 100)
-    # print( len( o_dfile.get_full_comp_arr("einf")[o_dfile.get_full_comp_arr("einf") > 0] ) )
-
-    o_outflow = EJECTA_PARS(fname=Path("../../data/large/skynet_input.h5"), skynetdir=Path("../../data/skynet"), radius=450. * 1000 * 100)
-    arr = o_outflow.get_full_arr("eninf")
-    # print(arr.min(), arr.max())
-    # print(len(np.array(arr[arr>0]).flatten()))
-
-    time, mass_flux, mass = o_outflow.get_cumulative_ejected_mass("geo")
-
-    yields = o_outflow.get_nucleo_arr("geo", "yields")
-    a = o_outflow.get_nucleo_arr("geo", "A")
-    z = o_outflow.get_nucleo_arr("geo", "Z")
-    # dfile = h5py.File(fpath, "w")
-    # dfile.create_dataset("Y_final", data=yields)
-    # dfile.create_dataset("A", data=a)
-    # dfile.create_dataset("Z", data=z)
-    # dfile.close()
-
-    # sim_nuc = o_outflow.get_normed_sim_abund(0, "geo", "Asol=195")
-    # sol_nuc = o_outflow.get_nored_sol_abund("sum")
-
-    print(2.*mass/CONST.Msun)
-    plt.plot(time, mass/CONST.Msun)
-    plt.show()
+    #
+    # # o_dfile = COMPUTE_OUTFLOW_SURFACE_H5(fname=Path("../../data/large/skynet_input.h5"), radius=450. * 1000 * 100)
+    # # print( len( o_dfile.get_full_comp_arr("einf")[o_dfile.get_full_comp_arr("einf") > 0] ) )
+    #
+    # # o_outflow = EJECTA_PARS(fname=Path("../../data/large/skynet_input.h5"), skynetdir=Path("../../data/skynet"), radius=450. * 1000 * 100)
+    # o_outflow = EJECTA_PARS(fname=Path("../../data/large/skynet_input.h5"),
+    #                         skynetdir=Path("../../data/skynet"),
+    #                         radius=450. * 1000. * 100.)
+    # arr = o_outflow.get_full_arr("eninf")
+    # # print(arr.min(), arr.max())
+    # # print(len(np.array(arr[arr>0]).flatten()))
+    #
+    # time, mass_flux, mass = o_outflow.get_cumulative_ejected_mass("geo")
+    #
+    # yields = o_outflow.get_nucleo_arr("geo", "yields")
+    # a = o_outflow.get_nucleo_arr("geo", "A")
+    # z = o_outflow.get_nucleo_arr("geo", "Z")
+    # # dfile = h5py.File(fpath, "w")
+    # # dfile.create_dataset("Y_final", data=yields)
+    # # dfile.create_dataset("A", data=a)
+    # # dfile.create_dataset("Z", data=z)
+    # # dfile.close()
+    #
+    # # sim_nuc = o_outflow.get_normed_sim_abund(0, "geo", "Asol=195")
+    # # sol_nuc = o_outflow.get_nored_sol_abund("sum")
+    #
+    # print(2.*mass/CONST.Msun)
+    # plt.plot(time, mass/CONST.Msun)
+    # plt.show()
 
     #
     # # find precompute SkyNet grid

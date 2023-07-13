@@ -238,7 +238,7 @@ def get_corr_dic(mask, v_ns):
 # === Ejecta ===
 def get_hist_bins_ej(v_n):
     """ For ejecta histograms """
-    if v_n == "Y_e":
+    if v_n == "Ye":
         return np.linspace(0.035, 0.55, 100)
     elif v_n == "theta":
         return np.linspace(0.031, 3.111, 50)
@@ -246,7 +246,7 @@ def get_hist_bins_ej(v_n):
         return np.linspace(0.06, 6.29, 93)
     elif v_n == "vel_inf" or v_n == "vel_inf_bern":
         return np.linspace(0., 1., 50)
-    elif v_n == "entropy":
+    elif v_n == "s":
         return np.linspace(0, 200, 100)
     elif v_n == "temperature":
         return np.linspace(0, 5, 100)
